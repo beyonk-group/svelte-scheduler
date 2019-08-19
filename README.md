@@ -4,7 +4,7 @@
 
 ## Svelte Scheduler
 
-[![js-standard-style](https://img.shields.io/badge/code%20style-standard-brightgreen.svg)](http://standardjs.com) [![CircleCI](https://circleci.com/gh/beyonk-adventures/svelte-mapbox.svg?style=shield)](https://circleci.com/gh/beyonk-adventures/svelte-mapbox) [![svelte-v3](https://img.shields.io/badge/svelte-v3-blueviolet.svg)](https://svelte.dev)
+[![js-standard-style](https://img.shields.io/badge/code%20style-standard-brightgreen.svg)](http://standardjs.com) [![CircleCI](https://circleci.com/gh/beyonk-adventures/svelte-scheduler.svg?style=shield)](https://circleci.com/gh/beyonk-adventures/svelte-scheduler) [![svelte-v3](https://img.shields.io/badge/svelte-v3-blueviolet.svg)](https://svelte.dev)
 
 Calendaring component in Svelte
 

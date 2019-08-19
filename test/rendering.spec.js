@@ -1,7 +1,8 @@
-import Widget from '../src/Widget.svelte'
+import Scheduler from '../src/Scheduler.svelte'
 import { render, cleanup } from '@testing-library/svelte'
 import '@testing-library/jest-dom/extend-expect'
 import fetchMock from 'fetch-mock'
+import dayjs from 'dayjs'
 
 describe('App', () => {
   beforeEach(() => {
@@ -14,7 +15,7 @@ describe('App', () => {
   })
 
   test('should render greeting', () => {
-    const { getByText } = render(Widget, { props: { id: 'beyo12' } })
+    const { getByText } = render(Scheduler, { props: {} })
 
     expect(getByText('Book Now!'))
   })

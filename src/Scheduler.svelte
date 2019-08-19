@@ -50,7 +50,6 @@
 	import dayjs from 'dayjs'
 	import get from 'just-safe-get'
 
-	const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 	let currentDate = dayjs()
