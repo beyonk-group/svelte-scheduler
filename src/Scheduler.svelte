@@ -50,7 +50,7 @@
 	import dayjs from 'dayjs'
 	import get from 'just-safe-get'
 
-  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const dayNames = [0, 1, 2, 3, 4, 5, 6].map(d => dayjs().day(d).format('ddd'))
 
 	let currentDate = dayjs()
 	let schedule
