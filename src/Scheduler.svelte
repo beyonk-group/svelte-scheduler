@@ -25,7 +25,10 @@
 			<div 
 				class="day d-{weekday.number}"
 				class:is-valid={weekday.valid}
-				class:has-schedule={!!get(schedule, [ weekday.number ])}>
+        class:is-selected={selected === weekday.number}
+				class:has-schedule={!!get(schedule, [ weekday.number ])}
+        on:click={e => selectDay(weekday) }
+        >
 				<div class="content">
 					{#if weekday.valid}
 						<div class="number">
@@ -41,23 +44,37 @@
 		</div>
 		{/each}
 	</div>
+  {#if !!get(schedule, [ selected, 'popdown' ]) }
+  <div transition:fade>
+    <svelte:component this={schedule[selected].popdown} {...schedule[selected].props} />
+  </div>
+  {/if}
 </div>
 
 <script>
   import { calendarWeeks } from './utils.js'
   import { ChevronLeftIcon, ChevronRightIcon } from 'svelte-feather-icons'
-	import { onMount } from 'svelte'
+	import { onMount, createEventDispatcher } from 'svelte'
 	import dayjs from 'dayjs'
-	import get from 'just-safe-get'
-
+  import get from 'just-safe-get'
+  import { fade } from 'svelte/transition'
+  
+  const dispatch = createEventDispatcher()
   const dayNames = [0, 1, 2, 3, 4, 5, 6].map(d => dayjs().day(d).format('ddd'))
 
 	let currentDate = dayjs()
 	let schedule
+  let selected = null
 	
 	onMount (async () => {
 		await updateSchedule()
 	})
+
+  async function selectDay (weekday) {
+    if (!weekday.valid) { return }
+    selected = weekday.number
+    dispatch('select', { year: currentDate.year(), month: currentDate.month() + 1, day: weekday.number })
+  }
 
 	async function updateSchedule () {
 		schedule = await fetchSchedule(currentDate.year(), currentDate.month() + 1) || {}
@@ -127,7 +144,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: var(--beyonk-widget-theme);
+		color: lightgrey;
 		font-weight: 500;
 		border: 1px solid white;
 	}
@@ -171,7 +188,12 @@
 	.day.is-valid {
 		border-right: 1px solid lightgrey;
 		border-bottom: 1px solid lightgrey;
+    cursor: pointer;
 	}
+
+  .day.is-selected {
+    background-color: aquamarine;
+  }
 
 	.day.is-valid:first-of-type {
 		border-left: 1px solid lightgrey;

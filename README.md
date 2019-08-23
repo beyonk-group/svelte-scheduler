@@ -21,12 +21,77 @@ In the example below this is a simple JSON file which has nested years, months, 
 Inside each day is a reference to a component which should be rendered for that day, and a series of props to pass to it.
 
 ```jsx
+Basic usage
+
 // App.svelte
 <Scheduler bind:fetchSchedule />
 
 <script>
   import Scheduler from '@beyonk/svelte-scheduler'
-  import Smiley from './Smiley.svelte'
+  import Popdown from './Popdown.svelte'
+  import get from 'just-safe-get'
+
+  async function fetchSchedule (year, month) {
+    return get(schedules, [ year, month ])
+  }
+
+  const schedules = {
+    2019: {
+      8: {
+        22: {
+          component: Popdown,
+          props: {}
+        }
+      }
+    }
+  }
+</script>
+```
+
+Our EventList component responsively shows a quick day overview.
+
+```jsx
+// EventList.svelte
+<p>
+  ... whatever you want here.
+</p>
+```
+
+Each render, and each time the month is changed, the fetchSchedule method will be called again. fetchSchedule returns a simple json object of days of the month.
+
+## Events
+
+```jsx
+The scheduler fires a select event when a valid day is clicked, and sets the class 'is-selected' on that day in the calendar.
+
+// App.svelte
+<Scheduler on:select={select} />
+
+<script>
+  import Scheduler from '@beyonk/svelte-scheduler'
+  import get from 'just-safe-get'
+
+  function select (e) {
+    const { year, month, day } = e.details
+    // You can use year/month/day to fetch full information about an event.
+  }
+</script>
+```
+
+
+## Overview
+
+```jsx
+The scheduler can show a day-overview component when a day is clicked. Specify the 'overview' property on your month data.
+
+The overview component receives the same props as your day component.
+
+// App.svelte
+<Scheduler bind:fetchSchedule />
+
+<script>
+  import Scheduler from '@beyonk/svelte-scheduler'
+  import Popdown from './Popdown.svelte'
   import get from 'just-safe-get'
 
   async function fetchSchedule (year, month) {
@@ -38,6 +103,7 @@ Inside each day is a reference to a component which should be rendered for that 
       8: {
         22: {
           component: Smiley,
+          overview: Popdown
           props: {}
         }
       }
@@ -46,13 +112,11 @@ Inside each day is a reference to a component which should be rendered for that 
 </script>
 ```
 
-Our Smiley component is just a smiley.
+Our Popdown component lists full event detail.
 
 ```jsx
-// Smiley.svelte
+// Popdown.svelte
 <p>
-😊
+  ... whatever you want here.
 </p>
 ```
-
-Each render, and each time the month is changed, the fetchSchedule method will be called again. fetchSchedule returns a simple json object of days of the month.

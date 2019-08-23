@@ -2,6 +2,7 @@
     'use strict';
 
     function noop() { }
+    const identity = x => x;
     function assign(tar, src) {
         // @ts-ignore
         for (const k in src)
@@ -22,6 +23,41 @@
     }
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
+    }
+
+    const is_client = typeof window !== 'undefined';
+    let now = is_client
+        ? () => window.performance.now()
+        : () => Date.now();
+    let raf = is_client ? cb => requestAnimationFrame(cb) : noop;
+
+    const tasks = new Set();
+    let running = false;
+    function run_tasks() {
+        tasks.forEach(task => {
+            if (!task[0](now())) {
+                tasks.delete(task);
+                task[1]();
+            }
+        });
+        running = tasks.size > 0;
+        if (running)
+            raf(run_tasks);
+    }
+    function loop(fn) {
+        let task;
+        if (!running) {
+            running = true;
+            raf(run_tasks);
+        }
+        return {
+            promise: new Promise(fulfil => {
+                tasks.add(task = [fn, fulfil]);
+            }),
+            abort() {
+                tasks.delete(task);
+            }
+        };
     }
 
     function append(target, node) {
@@ -72,8 +108,72 @@
         if (text.data !== data)
             text.data = data;
     }
+    function set_style(node, key, value) {
+        node.style.setProperty(key, value);
+    }
     function toggle_class(element, name, toggle) {
         element.classList[toggle ? 'add' : 'remove'](name);
+    }
+    function custom_event(type, detail) {
+        const e = document.createEvent('CustomEvent');
+        e.initCustomEvent(type, false, false, detail);
+        return e;
+    }
+
+    let stylesheet;
+    let active = 0;
+    let current_rules = {};
+    // https://github.com/darkskyapp/string-hash/blob/master/index.js
+    function hash(str) {
+        let hash = 5381;
+        let i = str.length;
+        while (i--)
+            hash = ((hash << 5) - hash) ^ str.charCodeAt(i);
+        return hash >>> 0;
+    }
+    function create_rule(node, a, b, duration, delay, ease, fn, uid = 0) {
+        const step = 16.666 / duration;
+        let keyframes = '{\n';
+        for (let p = 0; p <= 1; p += step) {
+            const t = a + (b - a) * ease(p);
+            keyframes += p * 100 + `%{${fn(t, 1 - t)}}\n`;
+        }
+        const rule = keyframes + `100% {${fn(b, 1 - b)}}\n}`;
+        const name = `__svelte_${hash(rule)}_${uid}`;
+        if (!current_rules[name]) {
+            if (!stylesheet) {
+                const style = element('style');
+                document.head.appendChild(style);
+                stylesheet = style.sheet;
+            }
+            current_rules[name] = true;
+            stylesheet.insertRule(`@keyframes ${name} ${rule}`, stylesheet.cssRules.length);
+        }
+        const animation = node.style.animation || '';
+        node.style.animation = `${animation ? `${animation}, ` : ``}${name} ${duration}ms linear ${delay}ms 1 both`;
+        active += 1;
+        return name;
+    }
+    function delete_rule(node, name) {
+        node.style.animation = (node.style.animation || '')
+            .split(', ')
+            .filter(name
+            ? anim => anim.indexOf(name) < 0 // remove specific animation
+            : anim => anim.indexOf('__svelte') === -1 // remove all Svelte animations
+        )
+            .join(', ');
+        if (name && !--active)
+            clear_rules();
+    }
+    function clear_rules() {
+        raf(() => {
+            if (active)
+                return;
+            let i = stylesheet.cssRules.length;
+            while (i--)
+                stylesheet.deleteRule(i);
+            current_rules = {};
+        });
     }
 
     let current_component;
@@ -87,6 +187,20 @@
     }
     function onMount(fn) {
         get_current_component().$$.on_mount.push(fn);
+    }
+    function createEventDispatcher() {
+        const component = current_component;
+        return (type, detail) => {
+            const callbacks = component.$$.callbacks[type];
+            if (callbacks) {
+                // TODO are there situations where events could be dispatched
+                // in a server (non-DOM) environment?
+                const event = custom_event(type, detail);
+                callbacks.slice().forEach(fn => {
+                    fn.call(component, event);
+                });
+            }
+        };
     }
 
     const dirty_components = [];
@@ -146,6 +260,20 @@
             $$.after_update.forEach(add_render_callback);
         }
     }
+
+    let promise;
+    function wait() {
+        if (!promise) {
+            promise = Promise.resolve();
+            promise.then(() => {
+                promise = null;
+            });
+        }
+        return promise;
+    }
+    function dispatch(node, direction, kind) {
+        node.dispatchEvent(custom_event(`${direction ? 'intro' : 'outro'}${kind}`));
+    }
     const outroing = new Set();
     let outros;
     function group_outros() {
@@ -182,6 +310,112 @@
             });
             block.o(local);
         }
+    }
+    const null_transition = { duration: 0 };
+    function create_bidirectional_transition(node, fn, params, intro) {
+        let config = fn(node, params);
+        let t = intro ? 0 : 1;
+        let running_program = null;
+        let pending_program = null;
+        let animation_name = null;
+        function clear_animation() {
+            if (animation_name)
+                delete_rule(node, animation_name);
+        }
+        function init(program, duration) {
+            const d = program.b - t;
+            duration *= Math.abs(d);
+            return {
+                a: t,
+                b: program.b,
+                d,
+                duration,
+                start: program.start,
+                end: program.start + duration,
+                group: program.group
+            };
+        }
+        function go(b) {
+            const { delay = 0, duration = 300, easing = identity, tick = noop, css } = config || null_transition;
+            const program = {
+                start: now() + delay,
+                b
+            };
+            if (!b) {
+                // @ts-ignore todo: improve typings
+                program.group = outros;
+                outros.r += 1;
+            }
+            if (running_program) {
+                pending_program = program;
+            }
+            else {
+                // if this is an intro, and there's a delay, we need to do
+                // an initial tick and/or apply CSS animation immediately
+                if (css) {
+                    clear_animation();
+                    animation_name = create_rule(node, t, b, duration, delay, easing, css);
+                }
+                if (b)
+                    tick(0, 1);
+                running_program = init(program, duration);
+                add_render_callback(() => dispatch(node, b, 'start'));
+                loop(now => {
+                    if (pending_program && now > pending_program.start) {
+                        running_program = init(pending_program, duration);
+                        pending_program = null;
+                        dispatch(node, running_program.b, 'start');
+                        if (css) {
+                            clear_animation();
+                            animation_name = create_rule(node, t, running_program.b, running_program.duration, 0, easing, config.css);
+                        }
+                    }
+                    if (running_program) {
+                        if (now >= running_program.end) {
+                            tick(t = running_program.b, 1 - t);
+                            dispatch(node, running_program.b, 'end');
+                            if (!pending_program) {
+                                // we're done
+                                if (running_program.b) {
+                                    // intro — we can tidy up immediately
+                                    clear_animation();
+                                }
+                                else {
+                                    // outro — needs to be coordinated
+                                    if (!--running_program.group.r)
+                                        run_all(running_program.group.c);
+                                }
+                            }
+                            running_program = null;
+                        }
+                        else if (now >= running_program.start) {
+                            const p = now - running_program.start;
+                            t = running_program.a + running_program.d * easing(p / running_program.duration);
+                            tick(t, 1 - t);
+                        }
+                    }
+                    return !!(running_program || pending_program);
+                });
+            }
+        }
+        return {
+            run(b) {
+                if (is_function(config)) {
+                    wait().then(() => {
+                        // @ts-ignore
+                        config = config();
+                        go(b);
+                    });
+                }
+                else {
+                    go(b);
+                }
+            },
+            end() {
+                clear_animation();
+                running_program = pending_program = null;
+            }
+        };
     }
 
     function get_spread_update(levels, updates) {
@@ -530,12 +764,21 @@
       return obj;
     }
 
+    function fade(node, { delay = 0, duration = 400 }) {
+        const o = +getComputedStyle(node).opacity;
+        return {
+            delay,
+            duration,
+            css: t => `opacity: ${t * o}`
+        };
+    }
+
     /* src/Scheduler.svelte generated by Svelte v3.8.0 */
 
     function add_css() {
     	var style = element("style");
-    	style.id = 'svelte-zwxjqg-style';
-    	style.textContent = ".scheduler.svelte-zwxjqg{width:100%}.navigation .button svg{stroke:grey;height:16px;width:16px}.month.svelte-zwxjqg{display:-webkit-box;display:flex;-webkit-box-orient:vertical;-webkit-box-direction:normal;flex-direction:column}.week.svelte-zwxjqg,.header.svelte-zwxjqg,.navigation.svelte-zwxjqg{display:-webkit-box;display:flex;-webkit-box-orient:horizontal;-webkit-box-direction:normal;flex-direction:row}.header.svelte-zwxjqg{height:48px;display:-webkit-box;display:flex}.navigation.svelte-zwxjqg{display:-webkit-box;display:flex;-webkit-box-orient:horizontal;-webkit-box-direction:normal;flex-direction:row;-webkit-box-pack:justify;justify-content:space-between;margin:12px 0}.navigation.svelte-zwxjqg .button.svelte-zwxjqg{border:0;background-color:transparent}.navigation.svelte-zwxjqg .button.svelte-zwxjqg,.navigation.svelte-zwxjqg .current-month.svelte-zwxjqg{font-size:16px;display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;font-weight:500}.day-name.svelte-zwxjqg{-webkit-box-flex:1;flex:1;display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;-webkit-box-pack:center;justify-content:center;color:var(--beyonk-widget-theme);font-weight:500;border:1px solid white}.week.svelte-zwxjqg{display:-webkit-box;display:flex;-webkit-box-orient:horizontal;-webkit-box-direction:normal;flex-direction:row;width:100%;-webkit-box-pack:space-evenly;justify-content:space-evenly}.day.svelte-zwxjqg{position:relative;width:100%;border:1px solid transparent;display:-webkit-box;display:flex;padding:12px}.day.svelte-zwxjqg::after,.day-name.svelte-zwxjqg::after{content:'';display:block;padding-bottom:100%}.day.svelte-zwxjqg .content.svelte-zwxjqg{display:-webkit-box;display:flex;-webkit-box-flex:1;flex:1}.day.svelte-zwxjqg .number.svelte-zwxjqg{position:absolute;top:0;left:0;font-size:16px;color:darkgrey;margin:6px}.day.is-valid.svelte-zwxjqg{border-right:1px solid lightgrey;border-bottom:1px solid lightgrey}.day.is-valid.svelte-zwxjqg:first-of-type{border-left:1px solid lightgrey}.day.d-1.svelte-zwxjqg,.day.d-2.svelte-zwxjqg,.day.d-3.svelte-zwxjqg,.day.d-4.svelte-zwxjqg,.day.d-5.svelte-zwxjqg,.day.d-6.svelte-zwxjqg,.day.d-7.svelte-zwxjqg{border-top:1px solid lightgrey}.day.d-1.svelte-zwxjqg{border-left:1px solid lightgrey}";
+    	style.id = 'svelte-1v4przp-style';
+    	style.textContent = ".scheduler.svelte-1v4przp{width:100%}.navigation .button svg{stroke:grey;height:16px;width:16px}.month.svelte-1v4przp{display:-webkit-box;display:flex;-webkit-box-orient:vertical;-webkit-box-direction:normal;flex-direction:column}.week.svelte-1v4przp,.header.svelte-1v4przp,.navigation.svelte-1v4przp{display:-webkit-box;display:flex;-webkit-box-orient:horizontal;-webkit-box-direction:normal;flex-direction:row}.header.svelte-1v4przp{height:48px;display:-webkit-box;display:flex}.navigation.svelte-1v4przp{display:-webkit-box;display:flex;-webkit-box-orient:horizontal;-webkit-box-direction:normal;flex-direction:row;-webkit-box-pack:justify;justify-content:space-between;margin:12px 0}.navigation.svelte-1v4przp .button.svelte-1v4przp{border:0;background-color:transparent}.navigation.svelte-1v4przp .button.svelte-1v4przp,.navigation.svelte-1v4przp .current-month.svelte-1v4przp{font-size:16px;display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;font-weight:500}.day-name.svelte-1v4przp{-webkit-box-flex:1;flex:1;display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;-webkit-box-pack:center;justify-content:center;color:lightgrey;font-weight:500;border:1px solid white}.week.svelte-1v4przp{display:-webkit-box;display:flex;-webkit-box-orient:horizontal;-webkit-box-direction:normal;flex-direction:row;width:100%;-webkit-box-pack:space-evenly;justify-content:space-evenly}.day.svelte-1v4przp{position:relative;width:100%;border:1px solid transparent;display:-webkit-box;display:flex;padding:12px}.day.svelte-1v4przp::after,.day-name.svelte-1v4przp::after{content:'';display:block;padding-bottom:100%}.day.svelte-1v4przp .content.svelte-1v4przp{display:-webkit-box;display:flex;-webkit-box-flex:1;flex:1}.day.svelte-1v4przp .number.svelte-1v4przp{position:absolute;top:0;left:0;font-size:16px;color:darkgrey;margin:6px}.day.is-valid.svelte-1v4przp{border-right:1px solid lightgrey;border-bottom:1px solid lightgrey;cursor:pointer}.day.is-selected.svelte-1v4przp{background-color:aquamarine}.day.is-valid.svelte-1v4przp:first-of-type{border-left:1px solid lightgrey}.day.d-1.svelte-1v4przp,.day.d-2.svelte-1v4przp,.day.d-3.svelte-1v4przp,.day.d-4.svelte-1v4przp,.day.d-5.svelte-1v4przp,.day.d-6.svelte-1v4przp,.day.d-7.svelte-1v4przp{border-top:1px solid lightgrey}.day.d-1.svelte-1v4przp{border-left:1px solid lightgrey}";
     	append(document.head, style);
     }
 
@@ -567,7 +810,7 @@
     			div = element("div");
     			t0 = text(t0_value);
     			t1 = space();
-    			attr(div, "class", "day-name svelte-zwxjqg");
+    			attr(div, "class", "day-name svelte-1v4przp");
     		},
 
     		m(target, anchor) {
@@ -586,11 +829,11 @@
     	};
     }
 
-    // (30:5) {#if weekday.valid}
-    function create_if_block(ctx) {
+    // (33:5) {#if weekday.valid}
+    function create_if_block_1(ctx) {
     	var div, span, t0_value = ctx.weekday.number + "", t0, t1, if_block_anchor, current;
 
-    	var if_block = (!!justSafeGet(ctx.schedule, [ ctx.weekday.number ])) && create_if_block_1(ctx);
+    	var if_block = (!!justSafeGet(ctx.schedule, [ ctx.weekday.number ])) && create_if_block_2(ctx);
 
     	return {
     		c() {
@@ -600,7 +843,7 @@
     			t1 = space();
     			if (if_block) if_block.c();
     			if_block_anchor = empty();
-    			attr(div, "class", "number svelte-zwxjqg");
+    			attr(div, "class", "number svelte-1v4przp");
     		},
 
     		m(target, anchor) {
@@ -623,7 +866,7 @@
     					if_block.p(changed, ctx);
     					transition_in(if_block, 1);
     				} else {
-    					if_block = create_if_block_1(ctx);
+    					if_block = create_if_block_2(ctx);
     					if_block.c();
     					transition_in(if_block, 1);
     					if_block.m(if_block_anchor.parentNode, if_block_anchor);
@@ -663,8 +906,8 @@
     	};
     }
 
-    // (34:6) {#if !!get(schedule, [ weekday.number ])}
-    function create_if_block_1(ctx) {
+    // (37:6) {#if !!get(schedule, [ weekday.number ])}
+    function create_if_block_2(ctx) {
     	var switch_instance_anchor, current;
 
     	var switch_instance_spread_levels = [
@@ -755,19 +998,25 @@
 
     // (24:3) {#each week as weekday, d}
     function create_each_block_1(ctx) {
-    	var div1, div0, div1_class_value, current;
+    	var div1, div0, div1_class_value, current, dispose;
 
-    	var if_block = (ctx.weekday.valid) && create_if_block(ctx);
+    	var if_block = (ctx.weekday.valid) && create_if_block_1(ctx);
+
+    	function click_handler(...args) {
+    		return ctx.click_handler(ctx, ...args);
+    	}
 
     	return {
     		c() {
     			div1 = element("div");
     			div0 = element("div");
     			if (if_block) if_block.c();
-    			attr(div0, "class", "content svelte-zwxjqg");
-    			attr(div1, "class", div1_class_value = "day d-" + ctx.weekday.number + " svelte-zwxjqg");
+    			attr(div0, "class", "content svelte-1v4przp");
+    			attr(div1, "class", div1_class_value = "day d-" + ctx.weekday.number + " svelte-1v4przp");
     			toggle_class(div1, "is-valid", ctx.weekday.valid);
+    			toggle_class(div1, "is-selected", ctx.selected === ctx.weekday.number);
     			toggle_class(div1, "has-schedule", !!justSafeGet(ctx.schedule, [ ctx.weekday.number ]));
+    			dispose = listen(div1, "click", click_handler);
     		},
 
     		m(target, anchor) {
@@ -777,13 +1026,14 @@
     			current = true;
     		},
 
-    		p(changed, ctx) {
+    		p(changed, new_ctx) {
+    			ctx = new_ctx;
     			if (ctx.weekday.valid) {
     				if (if_block) {
     					if_block.p(changed, ctx);
     					transition_in(if_block, 1);
     				} else {
-    					if_block = create_if_block(ctx);
+    					if_block = create_if_block_1(ctx);
     					if_block.c();
     					transition_in(if_block, 1);
     					if_block.m(div0, null);
@@ -796,12 +1046,16 @@
     				check_outros();
     			}
 
-    			if ((!current || changed.currentDate) && div1_class_value !== (div1_class_value = "day d-" + ctx.weekday.number + " svelte-zwxjqg")) {
+    			if ((!current || changed.currentDate) && div1_class_value !== (div1_class_value = "day d-" + ctx.weekday.number + " svelte-1v4przp")) {
     				attr(div1, "class", div1_class_value);
     			}
 
     			if ((changed.calendarWeeks || changed.currentDate || changed.calendarWeeks || changed.currentDate)) {
     				toggle_class(div1, "is-valid", ctx.weekday.valid);
+    			}
+
+    			if ((changed.calendarWeeks || changed.currentDate || changed.selected || changed.calendarWeeks || changed.currentDate)) {
+    				toggle_class(div1, "is-selected", ctx.selected === ctx.weekday.number);
     			}
 
     			if ((changed.calendarWeeks || changed.currentDate || changed.get || changed.schedule || changed.calendarWeeks || changed.currentDate)) {
@@ -826,6 +1080,7 @@
     			}
 
     			if (if_block) if_block.d();
+    			dispose();
     		}
     	};
     }
@@ -855,7 +1110,7 @@
     			}
 
     			t = space();
-    			attr(div, "class", "week svelte-zwxjqg");
+    			attr(div, "class", "week svelte-1v4przp");
     		},
 
     		m(target, anchor) {
@@ -870,7 +1125,7 @@
     		},
 
     		p(changed, ctx) {
-    			if (changed.calendarWeeks || changed.currentDate || changed.get || changed.schedule) {
+    			if (changed.calendarWeeks || changed.currentDate || changed.selected || changed.get || changed.schedule) {
     				each_value_1 = ctx.week;
 
     				for (var i = 0; i < each_value_1.length; i += 1) {
@@ -917,8 +1172,112 @@
     	};
     }
 
+    // (47:2) {#if !!get(schedule, [ selected, 'popdown' ]) }
+    function create_if_block(ctx) {
+    	var div, div_transition, current;
+
+    	var switch_instance_spread_levels = [
+    		ctx.schedule[ctx.selected].props
+    	];
+
+    	var switch_value = ctx.schedule[ctx.selected].popdown;
+
+    	function switch_props(ctx) {
+    		let switch_instance_props = {};
+    		for (var i = 0; i < switch_instance_spread_levels.length; i += 1) {
+    			switch_instance_props = assign(switch_instance_props, switch_instance_spread_levels[i]);
+    		}
+    		return { props: switch_instance_props };
+    	}
+
+    	if (switch_value) {
+    		var switch_instance = new switch_value(switch_props());
+    	}
+
+    	return {
+    		c() {
+    			div = element("div");
+    			if (switch_instance) switch_instance.$$.fragment.c();
+    		},
+
+    		m(target, anchor) {
+    			insert(target, div, anchor);
+
+    			if (switch_instance) {
+    				mount_component(switch_instance, div, null);
+    			}
+
+    			current = true;
+    		},
+
+    		p(changed, ctx) {
+    			var switch_instance_changes = (changed.schedule || changed.selected) ? get_spread_update(switch_instance_spread_levels, [
+    									ctx.schedule[ctx.selected].props
+    								]) : {};
+
+    			if (switch_value !== (switch_value = ctx.schedule[ctx.selected].popdown)) {
+    				if (switch_instance) {
+    					group_outros();
+    					const old_component = switch_instance;
+    					transition_out(old_component.$$.fragment, 1, 0, () => {
+    						destroy_component(old_component, 1);
+    					});
+    					check_outros();
+    				}
+
+    				if (switch_value) {
+    					switch_instance = new switch_value(switch_props());
+
+    					switch_instance.$$.fragment.c();
+    					transition_in(switch_instance.$$.fragment, 1);
+    					mount_component(switch_instance, div, null);
+    				} else {
+    					switch_instance = null;
+    				}
+    			}
+
+    			else if (switch_value) {
+    				switch_instance.$set(switch_instance_changes);
+    			}
+    		},
+
+    		i(local) {
+    			if (current) return;
+    			if (switch_instance) transition_in(switch_instance.$$.fragment, local);
+
+    			add_render_callback(() => {
+    				if (!div_transition) div_transition = create_bidirectional_transition(div, fade, {}, true);
+    				div_transition.run(1);
+    			});
+
+    			current = true;
+    		},
+
+    		o(local) {
+    			if (switch_instance) transition_out(switch_instance.$$.fragment, local);
+
+    			if (!div_transition) div_transition = create_bidirectional_transition(div, fade, {}, false);
+    			div_transition.run(0);
+
+    			current = false;
+    		},
+
+    		d(detaching) {
+    			if (detaching) {
+    				detach(div);
+    			}
+
+    			if (switch_instance) destroy_component(switch_instance);
+
+    			if (detaching) {
+    				if (div_transition) div_transition.end();
+    			}
+    		}
+    	};
+    }
+
     function create_fragment$2(ctx) {
-    	var div4, div1, button0, t0, div0, t1_value = ctx.currentDate.format('MMMM') + "", t1, t2, button1, t3, div3, div2, t4, current, dispose;
+    	var div4, div1, button0, t0, div0, t1_value = ctx.currentDate.format('MMMM') + "", t1, t2, button1, t3, div3, div2, t4, t5, current, dispose;
 
     	var chevronlefticon = new ChevronLeftIcon({});
 
@@ -943,6 +1302,8 @@
     	const out = i => transition_out(each_blocks[i], 1, 1, () => {
     		each_blocks[i] = null;
     	});
+
+    	var if_block = (!!justSafeGet(ctx.schedule, [ ctx.selected, 'popdown' ])) && create_if_block(ctx);
 
     	return {
     		c() {
@@ -969,13 +1330,16 @@
     			for (var i = 0; i < each_blocks.length; i += 1) {
     				each_blocks[i].c();
     			}
-    			attr(button0, "class", "button is-medium previous svelte-zwxjqg");
-    			attr(div0, "class", "current-month svelte-zwxjqg");
-    			attr(button1, "class", "button is-medium next svelte-zwxjqg");
-    			attr(div1, "class", "navigation svelte-zwxjqg");
-    			attr(div2, "class", "header svelte-zwxjqg");
-    			attr(div3, "class", "month svelte-zwxjqg");
-    			attr(div4, "class", "scheduler svelte-zwxjqg");
+
+    			t5 = space();
+    			if (if_block) if_block.c();
+    			attr(button0, "class", "button is-medium previous svelte-1v4przp");
+    			attr(div0, "class", "current-month svelte-1v4przp");
+    			attr(button1, "class", "button is-medium next svelte-1v4przp");
+    			attr(div1, "class", "navigation svelte-1v4przp");
+    			attr(div2, "class", "header svelte-1v4przp");
+    			attr(div3, "class", "month svelte-1v4przp");
+    			attr(div4, "class", "scheduler svelte-1v4przp");
 
     			dispose = [
     				listen(button0, "click", ctx.prev),
@@ -1008,6 +1372,8 @@
     				each_blocks[i].m(div3, null);
     			}
 
+    			append(div4, t5);
+    			if (if_block) if_block.m(div4, null);
     			current = true;
     		},
 
@@ -1037,7 +1403,7 @@
     				each_blocks_1.length = each_value_2.length;
     			}
 
-    			if (changed.calendarWeeks || changed.currentDate || changed.get || changed.schedule) {
+    			if (changed.calendarWeeks || changed.currentDate || changed.selected || changed.get || changed.schedule) {
     				each_value = calendarWeeks(ctx.currentDate.year(), ctx.currentDate.month());
 
     				for (var i = 0; i < each_value.length; i += 1) {
@@ -1058,6 +1424,24 @@
     				for (i = each_value.length; i < each_blocks.length; i += 1) out(i);
     				check_outros();
     			}
+
+    			if (!!justSafeGet(ctx.schedule, [ ctx.selected, 'popdown' ])) {
+    				if (if_block) {
+    					if_block.p(changed, ctx);
+    					transition_in(if_block, 1);
+    				} else {
+    					if_block = create_if_block(ctx);
+    					if_block.c();
+    					transition_in(if_block, 1);
+    					if_block.m(div4, null);
+    				}
+    			} else if (if_block) {
+    				group_outros();
+    				transition_out(if_block, 1, 1, () => {
+    					if_block = null;
+    				});
+    				check_outros();
+    			}
     		},
 
     		i(local) {
@@ -1068,6 +1452,7 @@
 
     			for (var i = 0; i < each_value.length; i += 1) transition_in(each_blocks[i]);
 
+    			transition_in(if_block);
     			current = true;
     		},
 
@@ -1078,6 +1463,7 @@
     			each_blocks = each_blocks.filter(Boolean);
     			for (let i = 0; i < each_blocks.length; i += 1) transition_out(each_blocks[i]);
 
+    			transition_out(if_block);
     			current = false;
     		},
 
@@ -1094,20 +1480,31 @@
 
     			destroy_each(each_blocks, detaching);
 
+    			if (if_block) if_block.d();
     			run_all(dispose);
     		}
     	};
     }
 
     function instance($$self, $$props, $$invalidate) {
-      const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    	
+      
+      const dispatch = createEventDispatcher();
+      const dayNames = [0, 1, 2, 3, 4, 5, 6].map(d => dayjs_min().day(d).format('ddd'));
 
     	let currentDate = dayjs_min();
     	let schedule;
+      let selected = null;
     	
     	onMount (async () => {
     		await updateSchedule();
     	});
+
+      async function selectDay (weekday) {
+        if (!weekday.valid) { return }
+        $$invalidate('selected', selected = weekday.number);
+        dispatch('select', { year: currentDate.year(), month: currentDate.month() + 1, day: weekday.number });
+      }
 
     	async function updateSchedule () {
     		$$invalidate('schedule', schedule = await fetchSchedule(currentDate.year(), currentDate.month() + 1) || {});
@@ -1125,6 +1522,10 @@
     	
     	let { fetchSchedule } = $$props;
 
+    	function click_handler({ weekday }, e) {
+    		return selectDay(weekday);
+    	}
+
     	$$self.$set = $$props => {
     		if ('fetchSchedule' in $$props) $$invalidate('fetchSchedule', fetchSchedule = $$props.fetchSchedule);
     	};
@@ -1133,58 +1534,263 @@
     		dayNames,
     		currentDate,
     		schedule,
+    		selected,
+    		selectDay,
     		next,
     		prev,
-    		fetchSchedule
+    		fetchSchedule,
+    		click_handler
     	};
     }
 
     class Scheduler extends SvelteComponent {
     	constructor(options) {
     		super();
-    		if (!document.getElementById("svelte-zwxjqg-style")) add_css();
+    		if (!document.getElementById("svelte-1v4przp-style")) add_css();
     		init(this, options, instance, create_fragment$2, safe_not_equal, ["fetchSchedule"]);
     	}
     }
 
-    /* demo/Smiley.svelte generated by Svelte v3.8.0 */
+    function randomColour () {
+      return `hsla(${~~(360 * Math.random())}, 70%, 80%, 1)`
+    }
+
+    /* demo/EventList.svelte generated by Svelte v3.8.0 */
+
+    function add_css$1() {
+    	var style = element("style");
+    	style.id = 'svelte-1b2yfin-style';
+    	style.textContent = ".outer.svelte-1b2yfin{margin-top:6px;display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;-webkit-box-pack:start;justify-content:flex-start;height:100%;width:100%}.dot.svelte-1b2yfin{display:none;height:10px;width:10px;border-radius:50%}.info.svelte-1b2yfin{display:-webkit-box;display:flex;border-radius:5px;padding:3px 6px}@media only screen and (max-device-width: 700px){.dot.svelte-1b2yfin{display:-webkit-box;display:flex}.info.svelte-1b2yfin{display:none}}";
+    	append(document.head, style);
+    }
 
     function create_fragment$3(ctx) {
-    	var p;
+    	var div2, div0, t0, div1, t1_value = ctx.info() + "", t1;
 
     	return {
     		c() {
-    			p = element("p");
-    			p.textContent = "😊";
+    			div2 = element("div");
+    			div0 = element("div");
+    			t0 = space();
+    			div1 = element("div");
+    			t1 = text(t1_value);
+    			attr(div0, "class", "dot svelte-1b2yfin");
+    			set_style(div0, "background-color", randomColour());
+    			attr(div1, "class", "info svelte-1b2yfin");
+    			set_style(div1, "background-color", randomColour());
+    			attr(div2, "class", "outer svelte-1b2yfin");
     		},
 
     		m(target, anchor) {
-    			insert(target, p, anchor);
+    			insert(target, div2, anchor);
+    			append(div2, div0);
+    			append(div2, t0);
+    			append(div2, div1);
+    			append(div1, t1);
     		},
 
-    		p: noop,
+    		p(changed, ctx) {
+    			if (changed.randomColour) {
+    				set_style(div0, "background-color", randomColour());
+    				set_style(div1, "background-color", randomColour());
+    			}
+    		},
+
     		i: noop,
     		o: noop,
 
     		d(detaching) {
     			if (detaching) {
-    				detach(p);
+    				detach(div2);
     			}
     		}
     	};
     }
 
-    class Smiley extends SvelteComponent {
+    function instance$1($$self, $$props, $$invalidate) {
+    	let { events } = $$props;
+
+      function info () {
+        return `${events.length} event${events.length > 1 ? 's' : ''}`
+      }
+
+    	$$self.$set = $$props => {
+    		if ('events' in $$props) $$invalidate('events', events = $$props.events);
+    	};
+
+    	return { events, info };
+    }
+
+    class EventList extends SvelteComponent {
     	constructor(options) {
     		super();
-    		init(this, options, null, create_fragment$3, safe_not_equal, []);
+    		if (!document.getElementById("svelte-1b2yfin-style")) add_css$1();
+    		init(this, options, instance$1, create_fragment$3, safe_not_equal, ["events"]);
+    	}
+    }
+
+    /* demo/Popdown.svelte generated by Svelte v3.8.0 */
+
+    function add_css$2() {
+    	var style = element("style");
+    	style.id = 'svelte-zbj9or-style';
+    	style.textContent = ".container.svelte-zbj9or{display:-webkit-box;display:flex;-webkit-box-orient:vertical;-webkit-box-direction:normal;flex-direction:column;width:100%}.item.svelte-zbj9or{display:-webkit-box;display:flex;width:100%;box-sizing:border-box}.item.background-on.svelte-zbj9or{background-color:lightgrey}.item.svelte-zbj9or>.time.svelte-zbj9or{display:-webkit-box;display:flex;-webkit-box-pack:end;justify-content:flex-end;-webkit-box-align:center;align-items:center;border-right:3px solid lightblue;width:4rem;padding:1rem 1rem 1rem 0.75rem;font-size:14px;font-weight:bold}.item.svelte-zbj9or>.description.svelte-zbj9or{-webkit-box-flex:1;flex:1;text-align:left;padding:1rem 2rem 1rem 2rem}";
+    	append(document.head, style);
+    }
+
+    function get_each_context$1(ctx, list, i) {
+    	const child_ctx = Object.create(ctx);
+    	child_ctx.event = list[i];
+    	child_ctx.i = i;
+    	return child_ctx;
+    }
+
+    // (2:2) {#each events as event, i}
+    function create_each_block$1(ctx) {
+    	var div4, div0, t0_value = ctx.event.time + "", t0, t1, div3, div1, t2_value = ctx.event.name + "", t2, t3, div2, t5;
+
+    	return {
+    		c() {
+    			div4 = element("div");
+    			div0 = element("div");
+    			t0 = text(t0_value);
+    			t1 = space();
+    			div3 = element("div");
+    			div1 = element("div");
+    			t2 = text(t2_value);
+    			t3 = space();
+    			div2 = element("div");
+    			div2.textContent = "4 guests";
+    			t5 = space();
+    			attr(div0, "class", "time svelte-zbj9or");
+    			set_style(div0, "border-right-color", randomColour());
+    			attr(div3, "class", "description svelte-zbj9or");
+    			attr(div4, "class", "item svelte-zbj9or");
+    			toggle_class(div4, "background-on", ctx.i % 2 == 1);
+    		},
+
+    		m(target, anchor) {
+    			insert(target, div4, anchor);
+    			append(div4, div0);
+    			append(div0, t0);
+    			append(div4, t1);
+    			append(div4, div3);
+    			append(div3, div1);
+    			append(div1, t2);
+    			append(div3, t3);
+    			append(div3, div2);
+    			append(div4, t5);
+    		},
+
+    		p(changed, ctx) {
+    			if ((changed.events) && t0_value !== (t0_value = ctx.event.time + "")) {
+    				set_data(t0, t0_value);
+    			}
+
+    			if (changed.randomColour) {
+    				set_style(div0, "border-right-color", randomColour());
+    			}
+
+    			if ((changed.events) && t2_value !== (t2_value = ctx.event.name + "")) {
+    				set_data(t2, t2_value);
+    			}
+    		},
+
+    		d(detaching) {
+    			if (detaching) {
+    				detach(div4);
+    			}
+    		}
+    	};
+    }
+
+    function create_fragment$4(ctx) {
+    	var div;
+
+    	var each_value = ctx.events;
+
+    	var each_blocks = [];
+
+    	for (var i = 0; i < each_value.length; i += 1) {
+    		each_blocks[i] = create_each_block$1(get_each_context$1(ctx, each_value, i));
+    	}
+
+    	return {
+    		c() {
+    			div = element("div");
+
+    			for (var i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].c();
+    			}
+    			attr(div, "class", "container svelte-zbj9or");
+    		},
+
+    		m(target, anchor) {
+    			insert(target, div, anchor);
+
+    			for (var i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].m(div, null);
+    			}
+    		},
+
+    		p(changed, ctx) {
+    			if (changed.events || changed.randomColour) {
+    				each_value = ctx.events;
+
+    				for (var i = 0; i < each_value.length; i += 1) {
+    					const child_ctx = get_each_context$1(ctx, each_value, i);
+
+    					if (each_blocks[i]) {
+    						each_blocks[i].p(changed, child_ctx);
+    					} else {
+    						each_blocks[i] = create_each_block$1(child_ctx);
+    						each_blocks[i].c();
+    						each_blocks[i].m(div, null);
+    					}
+    				}
+
+    				for (; i < each_blocks.length; i += 1) {
+    					each_blocks[i].d(1);
+    				}
+    				each_blocks.length = each_value.length;
+    			}
+    		},
+
+    		i: noop,
+    		o: noop,
+
+    		d(detaching) {
+    			if (detaching) {
+    				detach(div);
+    			}
+
+    			destroy_each(each_blocks, detaching);
+    		}
+    	};
+    }
+
+    function instance$2($$self, $$props, $$invalidate) {
+    	let { events } = $$props;
+
+    	$$self.$set = $$props => {
+    		if ('events' in $$props) $$invalidate('events', events = $$props.events);
+    	};
+
+    	return { events };
+    }
+
+    class Popdown extends SvelteComponent {
+    	constructor(options) {
+    		super();
+    		if (!document.getElementById("svelte-zbj9or-style")) add_css$2();
+    		init(this, options, instance$2, create_fragment$4, safe_not_equal, ["events"]);
     	}
     }
 
     /* demo/Demo.svelte generated by Svelte v3.8.0 */
 
-    function create_fragment$4(ctx) {
-    	var updating_fetchSchedule, current;
+    function create_fragment$5(ctx) {
+    	var div, updating_fetchSchedule, current;
 
     	function scheduler_fetchSchedule_binding(value) {
     		ctx.scheduler_fetchSchedule_binding.call(null, value);
@@ -1199,14 +1805,17 @@
     	var scheduler = new Scheduler({ props: scheduler_props });
 
     	binding_callbacks.push(() => bind(scheduler, 'fetchSchedule', scheduler_fetchSchedule_binding));
+    	scheduler.$on("select", ctx.select);
 
     	return {
     		c() {
+    			div = element("div");
     			scheduler.$$.fragment.c();
     		},
 
     		m(target, anchor) {
-    			mount_component(scheduler, target, anchor);
+    			insert(target, div, anchor);
+    			mount_component(scheduler, div, null);
     			current = true;
     		},
 
@@ -1231,24 +1840,41 @@
     		},
 
     		d(detaching) {
-    			destroy_component(scheduler, detaching);
+    			if (detaching) {
+    				detach(div);
+    			}
+
+    			destroy_component(scheduler);
     		}
     	};
     }
 
-    function instance$1($$self, $$props, $$invalidate) {
+    function instance$3($$self, $$props, $$invalidate) {
     	
+
+      let events = null;
 
       async function fetchSchedule (year, month) {
         return justSafeGet(schedules, [ year, month ])
+      }
+
+      async function select (e) {
+        const { year, month, day } = e.detail;
+        events = justSafeGet(schedules, [ year, month, day, 'props', 'events' ]);
       }
 
       const schedules = {
         2019: {
           8: {
             22: {
-              component: Smiley,
-              props: {}
+              component: EventList,
+              popdown: Popdown,
+              props: {
+                events: [
+                  { name: 'Lunch with Lyn', time: '13:30' },
+                  { name: 'Dinner With Steve', time: '23:00' }
+                ]
+              }
             }
           }
         }
@@ -1261,6 +1887,7 @@
 
     	return {
     		fetchSchedule,
+    		select,
     		scheduler_fetchSchedule_binding
     	};
     }
@@ -1268,7 +1895,7 @@
     class Demo extends SvelteComponent {
     	constructor(options) {
     		super();
-    		init(this, options, instance$1, create_fragment$4, safe_not_equal, []);
+    		init(this, options, instance$3, create_fragment$5, safe_not_equal, []);
     	}
     }
 
