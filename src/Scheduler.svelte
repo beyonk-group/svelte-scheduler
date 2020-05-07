@@ -56,11 +56,11 @@
     const dtf = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'short', day: '2-digit' })
     const [{ value: mo },,,, { value: ye }] = dtf.formatToParts(date)
 
-    return `${ye} ${mo}`
+    return `${mo} ${ye}`
   }
 
   $: {
-    schedules = fetchSchedule(currentDate.getYear(), currentDate.getMonth())
+    schedules = fetchSchedule(currentDate.getFullYear(), currentDate.getMonth())
   }
 
   function next () {
