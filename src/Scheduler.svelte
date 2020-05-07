@@ -30,7 +30,7 @@
 					on:click={() => setSchedule(weekday.number)}>
 					<div class="byk-content">
 						{#if weekday.valid}
-							<div class="byk-day-number">{schedule.hasOwnProperty(weekday.number)} {weekday.number}</div>
+							<div class="byk-day-number">{weekday.number}</div>
 						{/if}
 					</div>
 				</div>
