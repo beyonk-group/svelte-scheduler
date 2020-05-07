@@ -18,26 +18,24 @@
 			</div>
 			{/each}
 		</div>
-		{#await schedules then schedule}
-			{#each calendarWeeks(currentDate.getYear(), currentDate.getMonth()) as week, i (i)}
-			<div class="byk-week">
-				{#each week as weekday, d (i + d)}
-				<div 
-					class="byk-day d-{weekday.number}"
-					class:is-valid={weekday.valid}
-					class:is-selected={selected && selected.date.getDay() === weekday.number}
-					class:has-schedule={schedule.hasOwnProperty(weekday.number)}
-					on:click={() => setSchedule(weekday.number)}>
-					<div class="byk-content">
-						{#if weekday.valid}
-							<div class="byk-day-number">{weekday.number}</div>
-						{/if}
-					</div>
+		{#each calendarWeeks(currentDate.getYear(), currentDate.getMonth()) as week, i (i)}
+		<div class="byk-week">
+			{#each week as weekday, d (i + d)}
+			<div 
+				class="byk-day d-{weekday.number}"
+				class:is-valid={weekday.valid}
+				class:is-selected={selected && new Date(selected.date).getDay() === weekday.number}
+				class:has-schedule={schedules.hasOwnProperty(weekday.number)}
+				on:click={() => setSchedule(weekday.number)}>
+				<div class="byk-content">
+					{#if weekday.valid}
+						<div class="byk-day-number">{weekday.number}</div>
+					{/if}
 				</div>
-				{/each}
 			</div>
 			{/each}
-		{/await}
+		</div>
+		{/each}
 	</div>
 </div>
 
@@ -58,11 +56,13 @@
     const [{ value: mo },,,, { value: ye }] = dtf.formatToParts(date)
 
     return `${mo} ${ye}`
-  }
+	}
+	
+	async function updateSchedule(year, month) {
+		schedules = await fetchSchedule(year, month)
+	}
 
-  $: {
-    schedules = fetchSchedule(currentDate.getFullYear(), currentDate.getMonth())
-  }
+  $: updateSchedule(currentDate.getFullYear(), currentDate.getMonth())
 
   function next () {
     currentDate = new Date(currentDate.setMonth(currentDate.getMonth() + 1))
@@ -73,6 +73,7 @@
   }
 
   function setSchedule (day) {
+		console.log('set sched', day, schedules, hasSchedule(day), schedules[day])
     if (!hasSchedule(day)) { return }
     selected = schedules[day]
   }
