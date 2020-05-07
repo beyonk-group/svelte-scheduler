@@ -28,11 +28,12 @@
     "rollup-plugin-svelte-hot": "^0.5.0",
     "rollup-plugin-svg": "^2.0.0",
     "sass": "^1.26.5",
+    "sirv-cli": "^0.4.5",
     "svelte": "^3.22.2",
     "svelte-preprocess": "^3.7.4"
   },
   "dependencies": {
-    "sirv-cli": "^0.4.4"
+    "svelte-feather-icons": "^3.2.2"
   },
   "svelte": "src/Scheduler.svelte",
   "scripts": {

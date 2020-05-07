@@ -4,7 +4,7 @@
 			<ChevronLeftIcon />
 		</button>
 		<div class="byk-current-month">
-			{currentDate.format('MMMM YYYY')}
+			{formatDate(currentDate)}
 		</div>
 		<button on:click={next}>
 			<ChevronRightIcon />
@@ -19,13 +19,13 @@
 			{/each}
 		</div>
 		{#await schedules then schedule}
-			{#each calendarWeeks(currentDate.year(), currentDate.month()) as week, i (i)}
+			{#each calendarWeeks(currentDate.getYear(), currentDate.getMonth()) as week, i (i)}
 			<div class="byk-week">
 				{#each week as weekday, d (i + d)}
 				<div 
 					class="byk-day d-{weekday.number}"
 					class:is-valid={weekday.valid}
-					class:is-selected={selected && utcDate(selected).date() === weekday.number}
+					class:is-selected={selected && selected.getDay() === weekday.number}
 					class:has-schedule={schedule.hasOwnProperty(weekday.number)}
 					on:click={() => setSchedule(weekday.number)}>
 					<div class="byk-content">
@@ -44,25 +44,31 @@
 <script>
   import { calendarWeeks } from './utils.js'
   import { ChevronLeftIcon, ChevronRightIcon } from 'svelte-feather-icons'
-  import { utcDate } from '@beyonk/date-utils'
 
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
   let schedules = {}
-  let currentDate = utcDate()
+  let currentDate = new Date()
   export let selected = null
   export let fetchSchedule = () => {}
 
+  function formatDate (date) {
+    const dtf = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'short', day: '2-digit' }) 
+    const [{ value: mo },,{ value: da },,{ value: ye }] = dtf.formatToParts(date) 
+
+    return `${ye} ${mo}`
+  }
+
   $: {
-    schedules = fetchSchedule(currentDate.year(), currentDate.month() + 1)
+    schedules = fetchSchedule(currentDate.getYear(), currentDate.getMonth())
   }
 
   function next () {
-    currentDate = currentDate.add(1, 'month')
+    currentDate = new Date(currentDate.setMonth(currentDate.getMonth() + 1))
   }
   
   function prev () {
-    currentDate = currentDate.subtract(1, 'month')
+    currentDate = new Date(currentDate.setMonth(currentDate.getMonth() - 1))
   }
 
   function setSchedule (day) {
