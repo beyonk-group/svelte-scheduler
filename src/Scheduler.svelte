@@ -53,8 +53,8 @@
   export let fetchSchedule = () => {}
 
   function formatDate (date) {
-    const dtf = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'short', day: '2-digit' }) 
-    const [{ value: mo },,{ value: da },,{ value: ye }] = dtf.formatToParts(date) 
+    const dtf = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'short', day: '2-digit' })
+    const [{ value: mo },,,, { value: ye }] = dtf.formatToParts(date)
 
     return `${ye} ${mo}`
   }
