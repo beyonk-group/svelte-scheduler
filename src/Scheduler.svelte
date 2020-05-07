@@ -56,11 +56,11 @@
     const [{ value: mo },,,, { value: ye }] = dtf.formatToParts(date)
 
     return `${mo} ${ye}`
-	}
-	
-	async function updateSchedule(year, month) {
-		schedules = await fetchSchedule(year, month)
-	}
+  }
+
+  async function updateSchedule (year, month) {
+    schedules = await fetchSchedule(year, month)
+  }
 
   $: updateSchedule(currentDate.getFullYear(), currentDate.getMonth())
 
@@ -73,7 +73,7 @@
   }
 
   function setSchedule (day) {
-		console.log('set sched', day, schedules, hasSchedule(day), schedules[day])
+    console.log('set sched', day, schedules, hasSchedule(day), schedules[day])
     if (!hasSchedule(day)) { return }
     selected = schedules[day]
   }
