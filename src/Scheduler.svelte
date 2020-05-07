@@ -24,7 +24,7 @@
 			<div 
 				class="byk-day d-{weekday.number}"
 				class:is-valid={weekday.valid}
-				class:is-selected={selected && new Date(selected.date).getDay() === weekday.number}
+				class:is-selected={selected && new Date(selected.date).getDate() === weekday.number}
 				class:has-schedule={schedules.hasOwnProperty(weekday.number)}
 				on:click={() => setSchedule(weekday.number)}>
 				<div class="byk-content">
