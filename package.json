@@ -29,7 +29,7 @@
     "rollup-plugin-svg": "^2.0.0",
     "sass": "^1.26.5",
     "sirv-cli": "^0.4.5",
-    "svelte": "^3.22.2",
+    "svelte": "^3.49.0",
     "svelte-preprocess": "^3.7.4"
   },
   "dependencies": {
